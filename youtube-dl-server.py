@@ -42,27 +42,29 @@ def q_size():
 @app.route('/youtube-dl/q', method='POST')
 def q_put():
     url = request.forms.get("url")
-    options = {
-        'format': request.forms.get("format")
-    }
+    options = {'format': request.forms.get("format")}
 
     if not url:
-        return {"success": False, "error": "/q called without a 'url' query param"}
+        return {
+            "success": False,
+            "error": "/q called without a 'url' query param",
+        }
 
     dl_q.put((url, options))
     print("Added url " + url + " to the download queue")
     return {"success": True, "url": url, "options": options}
 
+
 @app.route("/youtube-dl/update", method="GET")
 def update():
     command = ["pip", "install", "--upgrade", "youtube-dl"]
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
 
     output, error = proc.communicate()
-    return {
-        "output": output.decode('ascii'),
-        "error":  error.decode('ascii')
-    }
+    return {"output": output.decode('ascii'), "error": error.decode('ascii')}
+
 
 def dl_worker():
     while not done:
@@ -79,7 +81,15 @@ def get_ydl_options(request_options):
 
     requested_format = request_options.get('format', 'bestvideo')
 
-    if requested_format in ['aac', 'flac', 'mp3', 'm4a', 'opus', 'vorbis', 'wav']:
+    if requested_format in [
+        'aac',
+        'flac',
+        'mp3',
+        'm4a',
+        'opus',
+        'vorbis',
+        'wav',
+    ]:
         request_vars['YDL_EXTRACT_AUDIO_FORMAT'] = requested_format
     elif requested_format == 'bestaudio':
         request_vars['YDL_EXTRACT_AUDIO_FORMAT'] = 'best'
@@ -90,24 +100,28 @@ def get_ydl_options(request_options):
 
     postprocessors = []
 
-    if(ydl_vars['YDL_EXTRACT_AUDIO_FORMAT']):
-        postprocessors.append({
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': ydl_vars['YDL_EXTRACT_AUDIO_FORMAT'],
-            'preferredquality': ydl_vars['YDL_EXTRACT_AUDIO_QUALITY'],
-        })
+    if ydl_vars['YDL_EXTRACT_AUDIO_FORMAT']:
+        postprocessors.append(
+            {
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': ydl_vars['YDL_EXTRACT_AUDIO_FORMAT'],
+                'preferredquality': ydl_vars['YDL_EXTRACT_AUDIO_QUALITY'],
+            }
+        )
 
-    if(ydl_vars['YDL_RECODE_VIDEO_FORMAT']):
-        postprocessors.append({
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': ydl_vars['YDL_RECODE_VIDEO_FORMAT'],
-        })
+    if ydl_vars['YDL_RECODE_VIDEO_FORMAT']:
+        postprocessors.append(
+            {
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': ydl_vars['YDL_RECODE_VIDEO_FORMAT'],
+            }
+        )
 
     return {
         'format': ydl_vars['YDL_FORMAT'],
         'postprocessors': postprocessors,
         'outtmpl': ydl_vars['YDL_OUTPUT_TEMPLATE'],
-        'download_archive': ydl_vars['YDL_ARCHIVE_FILE']
+        'download_archive': ydl_vars['YDL_ARCHIVE_FILE'],
     }
 
 
@@ -130,6 +144,10 @@ print("Started download thread")
 
 app_vars = ChainMap(os.environ, app_defaults)
 
-app.run(host=app_vars['YDL_SERVER_HOST'], port=app_vars['YDL_SERVER_PORT'], debug=True)
+app.run(
+    host=app_vars['YDL_SERVER_HOST'],
+    port=app_vars['YDL_SERVER_PORT'],
+    debug=True,
+)
 done = True
 dl_thread.join()
