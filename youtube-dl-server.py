@@ -24,22 +24,25 @@ app_defaults = {
 }
 
 
-@app.route('/youtube-dl')
+token = os.environ.get('YDL_TOKEN', 'youtube-dl')
+
+
+@app.route('/' + token)
 def dl_queue_list():
     return static_file('index.html', root='./')
 
 
-@app.route('/youtube-dl/static/:filename#.*#')
+@app.route('/' + token + '/static/:filename#.*#')
 def server_static(filename):
     return static_file(filename, root='./static')
 
 
-@app.route('/youtube-dl/q', method='GET')
+@app.route('/' + token + '/q', method='GET')
 def q_size():
     return {"success": True, "size": json.dumps(list(dl_q.queue))}
 
 
-@app.route('/youtube-dl/q', method='POST')
+@app.route('/' + token + '/q', method='POST')
 def q_put():
     url = request.forms.get("url")
     options = {'format': request.forms.get("format")}
@@ -55,7 +58,7 @@ def q_put():
     return {"success": True, "url": url, "options": options}
 
 
-@app.route("/youtube-dl/update", method="GET")
+@app.route("/" + token + "/update", method="GET")
 def update():
     command = ["pip", "install", "--upgrade", "youtube-dl"]
     proc = subprocess.Popen(
