@@ -3,11 +3,12 @@ import json
 import os
 import subprocess
 from queue import Queue
-from bottle import route, run, Bottle, request, static_file
+from bottle import route, run, Bottle, request, static_file, template
 from threading import Thread
 import youtube_dl
 from pathlib import Path
 from collections import ChainMap
+from pathlib import Path
 
 app = Bottle()
 
@@ -29,7 +30,8 @@ token = os.environ.get('YDL_TOKEN', 'youtube-dl')
 
 @app.route('/' + token)
 def dl_queue_list():
-    return static_file('index.html', root='./')
+    index_html = (Path(__file__).parent / 'index.html').read_text()
+    return template(index_html, token=token)
 
 
 @app.route('/' + token + '/static/:filename#.*#')
