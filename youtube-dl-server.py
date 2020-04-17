@@ -2,6 +2,7 @@ from __future__ import unicode_literals
 import json
 import os
 import subprocess
+import pprint
 from queue import Queue
 from bottle import route, run, Bottle, request, static_file, template
 from threading import Thread
@@ -9,8 +10,17 @@ import youtube_dl
 from pathlib import Path
 from collections import ChainMap
 from pathlib import Path
+import unicodedata
+import string
 
 app = Bottle()
+
+token = os.environ.get('YDL_TOKEN', 'youtube-dl')
+outdir = os.environ.get('YDL_OUTDIR', '/youtube-dl')
+if not outdir == '':
+    outdir = '.'
+if not outdir.endswith('/'):
+    outdir += "/"
 
 
 app_defaults = {
@@ -18,14 +28,66 @@ app_defaults = {
     'YDL_EXTRACT_AUDIO_FORMAT': None,
     'YDL_EXTRACT_AUDIO_QUALITY': '192',
     'YDL_RECODE_VIDEO_FORMAT': None,
-    'YDL_OUTPUT_TEMPLATE': '/youtube-dl/%(title)s [%(id)s].%(ext)s',
+    'YDL_OUTPUT_TEMPLATE': '{title} [{id}].{ext}',
     'YDL_ARCHIVE_FILE': None,
     'YDL_SERVER_HOST': '0.0.0.0',
     'YDL_SERVER_PORT': 8080,
 }
 
 
-token = os.environ.get('YDL_TOKEN', 'youtube-dl')
+class SanitizedFilenameTmpl:
+    """Format string that evaluates to a safe filename."""
+
+    whitelist = "-_.() %s%s'\"" % (
+        string.ascii_letters,
+        string.digits,
+    )  #: string containing all allowed filename characters
+    char_limit = 128  #: max length of allowed filenames
+    # Technically, the limit is 255 - len('.part'), but 128 is much more
+    # reasonable for human consumption
+
+    def __init__(self, tmpl):
+        self._tmpl = tmpl
+
+    def _sanitize(self, val):
+        # 1. Replace unicode with ascii-equivalents
+        val = (
+            unicodedata.normalize('NFKD', val)
+            .encode('ASCII', 'ignore')
+            .decode()
+        )
+        # 2. Throw away any non-whitelisted characters
+        val = ''.join(c for c in val if c in self.whitelist)
+        return val.strip()
+
+    def format(self, **kwargs):
+        keys = set(
+            [
+                t[1]
+                for t in string.Formatter().parse(self._tmpl)
+                if t[1] is not None
+            ]
+        )
+        sanitized_kwargs = {
+            key: self._sanitize(kwargs.get(key, '')) for key in keys
+        }
+        filename = self._tmpl.format(**sanitized_kwargs)
+
+        while "  " in filename:  # eliminate double spaces
+            filename = filename.replace("  ", " ")
+
+        while len(filename) > self.char_limit:
+            # if filename is too long, elimitate characters from the longest
+            # field
+            len_overflow = len(filename) - self.char_limit
+            longest_val = max(sanitized_kwargs.values(), key=len)
+            shortened_val = longest_val[:-len_overflow].strip()
+            sanitized_kwargs = {
+                key: shortened_val if val == longest_val else val
+                for (key, val) in sanitized_kwargs.items()
+            }
+            filename = self._tmpl.format(**sanitized_kwargs)
+        return filename.strip()
 
 
 @app.route('/' + token)
@@ -55,9 +117,20 @@ def q_put():
             "error": "/q called without a 'url' query param",
         }
 
-    dl_q.put((url, options))
-    print("Added url " + url + " to the download queue")
-    return {"success": True, "url": url, "options": options}
+    ydl_options = get_ydl_options(options)
+    with youtube_dl.YoutubeDL(ydl_options) as ydl:
+        info = ydl.extract_info(url, download=False)
+        pprint.pprint(info)
+        outfile = SanitizedFilenameTmpl(ydl_options['outtmpl']).format(**info)
+        ydl.params['outtmpl'] = str(Path(outdir) / outfile)
+        dl_q.put((ydl, url))
+        print("Added url " + url + " to the download queue")
+        return {
+            "success": True,
+            "url": url,
+            "options": options,
+            "outfile": outfile,
+        }
 
 
 @app.route("/" + token + "/update", method="GET")
@@ -73,8 +146,8 @@ def update():
 
 def dl_worker():
     while not done:
-        url, options = dl_q.get()
-        download(url, options)
+        ydl, url = dl_q.get()
+        ydl.download([url])
         dl_q.task_done()
 
 
@@ -130,11 +203,6 @@ def get_ydl_options(request_options):
     }
 
 
-def download(url, request_options):
-    with youtube_dl.YoutubeDL(get_ydl_options(request_options)) as ydl:
-        ydl.download([url])
-
-
 dl_q = Queue()
 done = False
 dl_thread = Thread(target=dl_worker)
@@ -155,4 +223,5 @@ app.run(
     debug=True,
 )
 done = True
+print("Shutting down")
 dl_thread.join()
