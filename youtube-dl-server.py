@@ -181,16 +181,21 @@ def update():
 
 def dl_worker():
     while not done:
-        ydl, url = dl_q.get()
-        outfile = ydl.params['outtmpl']
-        if Path(outfile).is_file():
-            print("Removing existing %r" % outfile)
-            Path(outfile).unlink()
-        ydl.download([url])
-        if YDL_CHOWN_UID is not None:
-            os.chown(outfile, uid=int(YDL_CHOWN_UID), gid=YDL_CHOWN_GID)
-        print("Downloaded to %r" % outfile)
-        dl_q.task_done()
+        try:
+            ydl, url = dl_q.get()
+            outfile = ydl.params['outtmpl']
+            if Path(outfile).is_file():
+                print("Removing existing %r" % outfile)
+                Path(outfile).unlink()
+            ydl.download([url])
+            if YDL_CHOWN_UID is not None:
+                os.chown(
+                    outfile, uid=int(YDL_CHOWN_UID), gid=int(YDL_CHOWN_GID)
+                )
+            print("Downloaded to %r" % outfile)
+            dl_q.task_done()
+        except Exception as exc_info:
+            print("Exception: %r" % (exc_info,))
 
 
 def get_ydl_options(request_options):
