@@ -16,7 +16,7 @@ import string
 app = Bottle()
 
 TOKEN = os.environ.get('YDL_TOKEN', 'youtube-dl')
-OUTDIR = os.environ.get('YDL_OUTDIR', '/youtube-dl')
+OUTDIR = os.environ.get('YDL_OUTDIR', '')
 if OUTDIR == '':
     OUTDIR = '.'
 if not OUTDIR.endswith('/'):
@@ -25,13 +25,9 @@ if not OUTDIR.endswith('/'):
 YDL_CHOWN_UID = os.environ.get('YDL_CHOWN_UID', None)
 YDL_CHOWN_GID = os.environ.get('YDL_CHOWN_GID', -1)
 YDL_OUTPUT_TEMPLATE = '{title} [{id}]'
-
-
-app_defaults = {
-    'YDL_ARCHIVE_FILE': None,
-    'YDL_SERVER_HOST': '0.0.0.0',
-    'YDL_SERVER_PORT': 8080,
-}
+YDL_ARCHIVE_FILE = os.environ.get('YDL_ARCHIVE_FILE', None)
+YDL_SERVER_HOST = os.environ.get('YDL_SERVER_HOST', '0.0.0.0')
+YDL_SERVER_PORT = int(os.environ.get('YDL_SERVER_PORT', 8080))
 
 FORMATS = {
     'smallmp4': 'mp4[height<=480]/best[ext=mp4]',
@@ -127,7 +123,7 @@ def result_file(filename):
 
 @app.route('/' + TOKEN + '/q', method='GET')
 def q_size():
-    return {"success": True, "size": json.dumps(list(dl_q.queue))}
+    return {"success": True, "size": json.dumps(list(DL_Q.queue))}
 
 
 @app.route('/' + TOKEN + '/q', method='POST')
@@ -154,7 +150,7 @@ def q_put():
             + ext
         )
         ydl.params['outtmpl'] = str(Path(OUTDIR) / outfile)
-        dl_q.put((ydl, url))
+        DL_Q.put((ydl, url))
         print("Added url " + url + " to the download queue")
         if return_json == 'true':
             return {
@@ -180,9 +176,13 @@ def update():
 
 
 def dl_worker():
-    while not done:
+    """Process downloads from the DL_Q.
+
+    This is the main function of the download-thread.
+    """
+    while not DONE:
         try:
-            ydl, url = dl_q.get()
+            ydl, url = DL_Q.get()
             outfile = ydl.params['outtmpl']
             if Path(outfile).is_file():
                 print("Removing existing %r" % outfile)
@@ -193,22 +193,21 @@ def dl_worker():
                     outfile, uid=int(YDL_CHOWN_UID), gid=int(YDL_CHOWN_GID)
                 )
             print("Downloaded to %r" % outfile)
-            dl_q.task_done()
+            DL_Q.task_done()
         except Exception as exc_info:
             print("Exception: %r" % (exc_info,))
 
 
 def get_ydl_options(request_options):
+    """Generate options for YoutubeDL from http request options."""
     requested_format = request_options.get('format', 'normalmp4')
     ext = EXTENSIONS.get(requested_format, 'mp4')
 
-    ydl_vars = ChainMap(os.environ, app_defaults)
-
     default_format = FORMATS['normalmp4']
-    format = FORMATS.get(requested_format, default_format)
+    fmt = FORMATS.get(requested_format, default_format)
 
     postprocessors = []
-    if format == 'mp3':
+    if fmt == 'mp3':
         postprocessors.append(
             {
                 'key': 'FFmpegExtractAudio',
@@ -218,18 +217,19 @@ def get_ydl_options(request_options):
         )
 
     return {
-        'format': format,
-        'extension': ext,
+        'format': fmt,
+        'extension': ext,  # This is actually not part of YoutubeDL
+        'noplaylist': True,
         'postprocessors': postprocessors,
         'outtmpl': YDL_OUTPUT_TEMPLATE,
-        'download_archive': ydl_vars['YDL_ARCHIVE_FILE'],
+        'download_archive': YDL_ARCHIVE_FILE,
     }
 
 
-dl_q = Queue()
-done = False
-dl_thread = Thread(target=dl_worker)
-dl_thread.start()
+DL_Q = Queue()
+DONE = False
+DL_THREAD = Thread(target=dl_worker)
+DL_THREAD.start()
 
 print("Updating youtube-dl to the newest version")
 updateResult = update()
@@ -238,13 +238,11 @@ print(updateResult["error"])
 
 print("Started download thread")
 
-app_vars = ChainMap(os.environ, app_defaults)
-
 app.run(
-    host=app_vars['YDL_SERVER_HOST'],
-    port=app_vars['YDL_SERVER_PORT'],
+    host=YDL_SERVER_HOST,
+    port=YDL_SERVER_PORT,
     debug=True,
 )
-done = True
+DONE = True
 print("Shutting down")
-dl_thread.join()
+DL_THREAD.join()
