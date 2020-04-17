@@ -15,23 +15,36 @@ import string
 
 app = Bottle()
 
-token = os.environ.get('YDL_TOKEN', 'youtube-dl')
-outdir = os.environ.get('YDL_OUTDIR', '/youtube-dl')
-if not outdir == '':
-    outdir = '.'
-if not outdir.endswith('/'):
-    outdir += "/"
+TOKEN = os.environ.get('YDL_TOKEN', 'youtube-dl')
+OUTDIR = os.environ.get('YDL_OUTDIR', '/youtube-dl')
+if OUTDIR == '':
+    OUTDIR = '.'
+if not OUTDIR.endswith('/'):
+    OUTDIR += "/"
+
+YDL_CHOWN_UID = os.environ.get('YDL_CHOWN_UID', None)
+YDL_CHOWN_GID = os.environ.get('YDL_CHOWN_GID', -1)
+YDL_OUTPUT_TEMPLATE = '{title} [{id}]'
 
 
 app_defaults = {
-    'YDL_FORMAT': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
-    'YDL_EXTRACT_AUDIO_FORMAT': None,
-    'YDL_EXTRACT_AUDIO_QUALITY': '192',
-    'YDL_RECODE_VIDEO_FORMAT': None,
-    'YDL_OUTPUT_TEMPLATE': '{title} [{id}].{ext}',
     'YDL_ARCHIVE_FILE': None,
     'YDL_SERVER_HOST': '0.0.0.0',
     'YDL_SERVER_PORT': 8080,
+}
+
+FORMATS = {
+    'smallmp4': 'mp4[height<=480]/best[ext=mp4]',
+    'normalmp4': 'mp4[height<=720]/best[ext=mp4]',
+    'bestmp4': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+    'mp3': 'bestaudio/best',
+}
+
+EXTENSIONS = {
+    'smallmp4': 'mp4',
+    'normalmp4': 'mp4',
+    'bestmp4': 'mp4',
+    'mp3': 'mp3',
 }
 
 
@@ -90,26 +103,38 @@ class SanitizedFilenameTmpl:
         return filename.strip()
 
 
-@app.route('/' + token)
+@app.route('/' + TOKEN)
 def dl_queue_list():
     index_html = (Path(__file__).parent / 'index.html').read_text()
-    return template(index_html, token=token)
+    return template(index_html, token=TOKEN)
 
 
-@app.route('/' + token + '/static/:filename#.*#')
+@app.route('/' + TOKEN + '/static/:filename#.*#')
 def server_static(filename):
     return static_file(filename, root='./static')
 
 
-@app.route('/' + token + '/q', method='GET')
+@app.route('/' + TOKEN + '/result/:filename#.*#')
+def result_file(filename):
+    if (Path(OUTDIR) / filename).is_file():
+        return static_file(filename, root=OUTDIR)
+    else:
+        result_html = (
+            Path(__file__).parent / 'result_not_available.html'
+        ).read_text()
+        return template(result_html, token=TOKEN, outfile=filename)
+
+
+@app.route('/' + TOKEN + '/q', method='GET')
 def q_size():
     return {"success": True, "size": json.dumps(list(dl_q.queue))}
 
 
-@app.route('/' + token + '/q', method='POST')
+@app.route('/' + TOKEN + '/q', method='POST')
 def q_put():
     url = request.forms.get("url")
     options = {'format': request.forms.get("format")}
+    return_json = request.forms.get("return_json", 'true')
 
     if not url:
         return {
@@ -118,22 +143,32 @@ def q_put():
         }
 
     ydl_options = get_ydl_options(options)
+    print("ydl_options = %s" % pprint.pformat(ydl_options))
     with youtube_dl.YoutubeDL(ydl_options) as ydl:
         info = ydl.extract_info(url, download=False)
-        pprint.pprint(info)
-        outfile = SanitizedFilenameTmpl(ydl_options['outtmpl']).format(**info)
-        ydl.params['outtmpl'] = str(Path(outdir) / outfile)
+        # print("info = %s" % pprint.pformat(info))
+        ext = ydl_options['extension']
+        outfile = (
+            SanitizedFilenameTmpl(YDL_OUTPUT_TEMPLATE).format(**info)
+            + "."
+            + ext
+        )
+        ydl.params['outtmpl'] = str(Path(OUTDIR) / outfile)
         dl_q.put((ydl, url))
         print("Added url " + url + " to the download queue")
-        return {
-            "success": True,
-            "url": url,
-            "options": options,
-            "outfile": outfile,
-        }
+        if return_json == 'true':
+            return {
+                "success": True,
+                "url": url,
+                "options": options,
+                "outfile": outfile,
+            }
+        else:
+            result_html = (Path(__file__).parent / 'result.html').read_text()
+            return template(result_html, token=TOKEN, url=url, outfile=outfile)
 
 
-@app.route("/" + token + "/update", method="GET")
+@app.route("/" + TOKEN + "/update", method="GET")
 def update():
     command = ["pip", "install", "--upgrade", "youtube-dl"]
     proc = subprocess.Popen(
@@ -147,58 +182,41 @@ def update():
 def dl_worker():
     while not done:
         ydl, url = dl_q.get()
+        outfile = ydl.params['outtmpl']
+        if Path(outfile).is_file():
+            print("Removing existing %r" % outfile)
+            Path(outfile).unlink()
         ydl.download([url])
+        if YDL_CHOWN_UID is not None:
+            os.chown(outfile, uid=int(YDL_CHOWN_UID), gid=YDL_CHOWN_GID)
+        print("Downloaded to %r" % outfile)
         dl_q.task_done()
 
 
 def get_ydl_options(request_options):
-    request_vars = {
-        'YDL_EXTRACT_AUDIO_FORMAT': None,
-        'YDL_RECODE_VIDEO_FORMAT': None,
-    }
+    requested_format = request_options.get('format', 'normalmp4')
+    ext = EXTENSIONS.get(requested_format, 'mp4')
 
-    requested_format = request_options.get('format', 'bestvideo')
+    ydl_vars = ChainMap(os.environ, app_defaults)
 
-    if requested_format in [
-        'aac',
-        'flac',
-        'mp3',
-        'm4a',
-        'opus',
-        'vorbis',
-        'wav',
-    ]:
-        request_vars['YDL_EXTRACT_AUDIO_FORMAT'] = requested_format
-    elif requested_format == 'bestaudio':
-        request_vars['YDL_EXTRACT_AUDIO_FORMAT'] = 'best'
-    elif requested_format in ['mp4', 'flv', 'webm', 'ogg', 'mkv', 'avi']:
-        request_vars['YDL_RECODE_VIDEO_FORMAT'] = requested_format
-
-    ydl_vars = ChainMap(request_vars, os.environ, app_defaults)
+    default_format = FORMATS['normalmp4']
+    format = FORMATS.get(requested_format, default_format)
 
     postprocessors = []
-
-    if ydl_vars['YDL_EXTRACT_AUDIO_FORMAT']:
+    if format == 'mp3':
         postprocessors.append(
             {
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': ydl_vars['YDL_EXTRACT_AUDIO_FORMAT'],
-                'preferredquality': ydl_vars['YDL_EXTRACT_AUDIO_QUALITY'],
-            }
-        )
-
-    if ydl_vars['YDL_RECODE_VIDEO_FORMAT']:
-        postprocessors.append(
-            {
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': ydl_vars['YDL_RECODE_VIDEO_FORMAT'],
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
             }
         )
 
     return {
-        'format': ydl_vars['YDL_FORMAT'],
+        'format': format,
+        'extension': ext,
         'postprocessors': postprocessors,
-        'outtmpl': ydl_vars['YDL_OUTPUT_TEMPLATE'],
+        'outtmpl': YDL_OUTPUT_TEMPLATE,
         'download_archive': ydl_vars['YDL_ARCHIVE_FILE'],
     }
 
