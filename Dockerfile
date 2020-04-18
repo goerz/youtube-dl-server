@@ -22,4 +22,5 @@ EXPOSE 8080
 
 VOLUME ["/youtube-dl"]
 
+ENV YDL_OUTDIR=/youtube-dl
 CMD [ "python", "-u", "./youtube-dl-server.py" ]
