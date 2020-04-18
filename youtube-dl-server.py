@@ -1,19 +1,16 @@
-from __future__ import unicode_literals
+"""Web app wrapping around youtube-dl."""
 import json
 import os
-import subprocess
 import pprint
-from queue import Queue
-from bottle import route, run, Bottle, request, static_file, template
-from threading import Thread
-import youtube_dl
-from pathlib import Path
-from collections import ChainMap
-from pathlib import Path
-import unicodedata
 import string
+import subprocess
+import unicodedata
+from pathlib import Path
+from queue import Queue
+from threading import Thread
 
-app = Bottle()
+import bottle
+import youtube_dl
 
 TOKEN = os.environ.get('YDL_TOKEN', 'youtube-dl')
 OUTDIR = os.environ.get('YDL_OUTDIR', '')
@@ -42,6 +39,10 @@ EXTENSIONS = {
     'bestmp4': 'mp4',
     'mp3': 'mp3',
 }
+
+DL_Q = Queue()
+
+APP = bottle.Bottle()
 
 
 class SanitizedFilenameTmpl:
@@ -99,38 +100,38 @@ class SanitizedFilenameTmpl:
         return filename.strip()
 
 
-@app.route('/' + TOKEN)
+@APP.route('/' + TOKEN)
 def dl_queue_list():
     index_html = (Path(__file__).parent / 'index.html').read_text()
-    return template(index_html, token=TOKEN)
+    return bottle.template(index_html, token=TOKEN)
 
 
-@app.route('/' + TOKEN + '/static/:filename#.*#')
+@APP.route('/' + TOKEN + '/static/:filename#.*#')
 def server_static(filename):
-    return static_file(filename, root='./static')
+    return bottle.static_file(filename, root='./static')
 
 
-@app.route('/' + TOKEN + '/result/:filename#.*#')
+@APP.route('/' + TOKEN + '/result/:filename#.*#')
 def result_file(filename):
     if (Path(OUTDIR) / filename).is_file():
-        return static_file(filename, root=OUTDIR)
+        return bottle.static_file(filename, root=OUTDIR)
     else:
         result_html = (
             Path(__file__).parent / 'result_not_available.html'
         ).read_text()
-        return template(result_html, token=TOKEN, outfile=filename)
+        return bottle.template(result_html, token=TOKEN, outfile=filename)
 
 
-@app.route('/' + TOKEN + '/q', method='GET')
+@APP.route('/' + TOKEN + '/q', method='GET')
 def q_size():
     return {"success": True, "size": json.dumps(list(DL_Q.queue))}
 
 
-@app.route('/' + TOKEN + '/q', method='POST')
+@APP.route('/' + TOKEN + '/q', method='POST')
 def q_put():
-    url = request.forms.get("url")
-    options = {'format': request.forms.get("format")}
-    return_json = request.forms.get("return_json", 'true')
+    url = bottle.request.forms.get("url")
+    options = {'format': bottle.request.forms.get("format")}
+    return_json = bottle.request.forms.get("return_json", 'true')
 
     if not url:
         return {
@@ -161,10 +162,12 @@ def q_put():
             }
         else:
             result_html = (Path(__file__).parent / 'result.html').read_text()
-            return template(result_html, token=TOKEN, url=url, outfile=outfile)
+            return bottle.template(
+                result_html, token=TOKEN, url=url, outfile=outfile
+            )
 
 
-@app.route("/" + TOKEN + "/update", method="GET")
+@APP.route("/" + TOKEN + "/update", method="GET")
 def update():
     command = ["pip", "install", "--upgrade", "youtube-dl"]
     proc = subprocess.Popen(
@@ -173,29 +176,6 @@ def update():
 
     output, error = proc.communicate()
     return {"output": output.decode('ascii'), "error": error.decode('ascii')}
-
-
-def dl_worker():
-    """Process downloads from the DL_Q.
-
-    This is the main function of the download-thread.
-    """
-    while not DONE:
-        try:
-            ydl, url = DL_Q.get()
-            outfile = ydl.params['outtmpl']
-            if Path(outfile).is_file():
-                print("Removing existing %r" % outfile)
-                Path(outfile).unlink()
-            ydl.download([url])
-            if YDL_CHOWN_UID is not None:
-                os.chown(
-                    outfile, uid=int(YDL_CHOWN_UID), gid=int(YDL_CHOWN_GID)
-                )
-            print("Downloaded to %r" % outfile)
-            DL_Q.task_done()
-        except Exception as exc_info:
-            print("Exception: %r" % (exc_info,))
 
 
 def get_ydl_options(request_options):
@@ -226,23 +206,53 @@ def get_ydl_options(request_options):
     }
 
 
-DL_Q = Queue()
-DONE = False
-DL_THREAD = Thread(target=dl_worker)
-DL_THREAD.start()
+def dl_worker():
+    """Process downloads from the DL_Q.
 
-print("Updating youtube-dl to the newest version")
-updateResult = update()
-print(updateResult["output"])
-print(updateResult["error"])
+    This is the main function of the download thread.
+    """
+    while True:
+        try:
+            ydl, url = DL_Q.get()
+            if ydl is None:
+                return  # end the download thread with poison pill
+            outfile = ydl.params['outtmpl']
+            if Path(outfile).is_file():
+                print("Removing existing %r" % outfile)
+                Path(outfile).unlink()
+            ydl.download([url])
+            if YDL_CHOWN_UID is not None:
+                os.chown(
+                    outfile, uid=int(YDL_CHOWN_UID), gid=int(YDL_CHOWN_GID)
+                )
+            print("Downloaded to %r" % outfile)
+            DL_Q.task_done()
+        except Exception as exc_info:
+            print("Exception: %r" % (exc_info,))
 
-print("Started download thread")
 
-app.run(
-    host=YDL_SERVER_HOST,
-    port=YDL_SERVER_PORT,
-    debug=True,
-)
-DONE = True
-print("Shutting down")
-DL_THREAD.join()
+def main():
+    """Run APP.
+
+    This is the main function for the main thread.
+    """
+    dl_thread = Thread(target=dl_worker)
+    dl_thread.start()
+
+    print("Updating youtube-dl to the newest version")
+    updateResult = update()
+    print(updateResult["output"])
+    print(updateResult["error"])
+
+    print("Started download thread")
+
+    APP.run(
+        host=YDL_SERVER_HOST, port=YDL_SERVER_PORT, debug=True,
+    )
+    print("Shutting down")
+    DL_Q.put((None, None))  # poison pill for download thread
+    dl_thread.join()
+
+
+if __name__ == "__main__":
+    main()
