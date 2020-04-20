@@ -80,6 +80,12 @@ EXTENSIONS = {  # preset => file extension
     'mp3': 'mp3',
 }
 
+MIMETYPES = {
+    '.mp4': 'video/mp4',
+    '.mp3': 'audio/mpeg',
+    '.log': 'text/plain',
+}
+
 DL_Q = Queue()
 
 MAIN_LOGGER = logging.getLogger('youtubedl-server')
@@ -263,7 +269,11 @@ def result_file(username, filename):
 
     if download == 'true':
         if exists:
-            return bottle.static_file(filename, root=OUTDIRS[username])
+            return bottle.static_file(
+                filename,
+                root=OUTDIRS[username],
+                mimetype=MIMETYPES.get(Path(filename).suffix, True),
+            )
         else:
             bottle.abort(404, "No file %s" % filename)
     content = '<h1 class="display-4">youtube-dl</h1>\n'
