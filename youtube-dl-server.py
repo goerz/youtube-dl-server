@@ -6,6 +6,7 @@ import pprint
 import string
 import subprocess
 import textwrap
+import time
 import unicodedata
 from collections import defaultdict
 from functools import partial, wraps
@@ -18,15 +19,29 @@ from urllib.request import pathname2url
 import bottle
 import youtube_dl
 
-TOKEN = os.environ.get('YDL_TOKEN', 'testing')
-OUTDIR = os.environ.get('YDL_OUTDIR', '')
-if OUTDIR == '':
-    OUTDIR = '.'
-if not OUTDIR.endswith('/'):
-    OUTDIR += "/"
 
-YDL_CHOWN_UID = os.environ.get('YDL_CHOWN_UID', None)
-YDL_CHOWN_GID = os.environ.get('YDL_CHOWN_GID', -1)
+YDL_USERS = os.environ.get('YDL_USERS', 'youtube-dl:testing:./')
+
+
+def process_users(ydl_users):
+    """Process YDL_USERS specification."""
+    tokens = {}
+    outdirs = {}
+    uids = {}
+    gids = {}
+    for spec in ydl_users.split(";"):
+        username, token, outdir, uid, gid = (spec + "::::").split(":")[:5]
+        tokens[username] = token
+        outdirs[username] = outdir or './'
+        if not outdirs[username].endswith("/"):
+            outdirs[username] += "/"
+        uids[username] = uid or None
+        gids[username] = gid or None
+    return tokens, outdirs, uids, gids
+
+
+TOKENS, OUTDIRS, UIDS, GIDS = process_users(YDL_USERS)
+
 YDL_OUTPUT_TEMPLATE = '{title} [{id}]'
 YDL_SERVER_HOST = os.environ.get('YDL_SERVER_HOST', '0.0.0.0')
 YDL_SERVER_PORT = int(os.environ.get('YDL_SERVER_PORT', 8080))
@@ -126,36 +141,48 @@ APP = bottle.Bottle()
 APP.install(partial(log_to_logger, logger=MAIN_LOGGER))
 
 
-@APP.route('/')
-def dl_form():
+def is_authorized(username, token):
+    """Check whether the username/token combination is valid."""
+    if username not in TOKENS or TOKENS[username] != token:
+        time.sleep(1)  # make brute-forcing tokens very difficult
+        return False
+    return True
+
+
+@APP.route('/<username>')
+def dl_form(username):
     """Route for the root page (form for submitting a video)."""
     token = bottle.request.params.get("token", None)
-    if token != TOKEN:
+    if not is_authorized(username, token):
         bottle.abort(401, "Not authorized")
     template = (TEMPLATES / 'page.j2').read_text()
-    content = bottle.template((TEMPLATES / 'form.j2').read_text(), token=token)
+    content = bottle.template(
+        (TEMPLATES / 'form.j2').read_text(), username=username, token=token
+    )
     return bottle.template(template, title="youtube-dl", content=content)
 
 
-@APP.route('/list')
-def list_files():
+@APP.route('/<username>/list')
+def list_files(username):
     """Route for listing downloaded files."""
     token = bottle.request.params.get("token", None)
-    if token != TOKEN:
+    if not is_authorized(username, token):
         bottle.abort(401, "Not authorized")
     template = (TEMPLATES / 'page.j2').read_text()
     content = [
         '<h1 class="display-4">',
-        '<a href="/?token={token}">youtube-dl</a>'.format(token=token),
+        '<a href="/{username}?token={token}">youtube-dl</a>'.format(
+            username=username, token=token
+        ),
         '</h1>' '<div class="text-left">',
         '<p>Available files:</p>',
         '<ul>',
     ]
-    for filename in Path(OUTDIR).iterdir():
+    for filename in Path(OUTDIRS[username]).iterdir():
         if filename.is_file() and filename.suffix in ('.mp4', '.mp3'):
             content.append(
-                '<li><a href="/result/%s">%s</a></li>'
-                % (pathname2url(str(filename.name)), filename.name)
+                '<li><a href="/%s/result/%s">%s</a></li>'
+                % (username, pathname2url(str(filename.name)), filename.name)
             )
     content.append('</ul></div>')
     return bottle.template(
@@ -169,12 +196,12 @@ def server_static(filename):
     return bottle.static_file(filename, root='./static')
 
 
-@APP.route('/submit', method='POST')
-def submit():
+@APP.route('/<username>/submit', method='POST')
+def submit(username):
     """Route for submitting a request to download a video."""
     return_json = bottle.request.params.get("return_json", 'true')
     token = bottle.request.params.get("token", None)
-    if token != TOKEN:
+    if not is_authorized(username, token):
         if return_json == 'true':
             return {
                 "success": False,
@@ -192,7 +219,7 @@ def submit():
         else:
             bottle.abort(400, "missing 'url' query param")
     preset = bottle.request.params.get("preset", YDL_DEFAULT_PRESET)
-    result = submit_download(url, preset)
+    result = submit_download(username, url, preset)
 
     if return_json == 'true':
         return result
@@ -201,8 +228,9 @@ def submit():
             outfile = result['outfile']
             # Redirect to resulting file (https://httpstatuses.com/303)
             bottle.redirect(
-                "/result/%s?%s"
+                "/%s/result/%s?%s"
                 % (
+                    username,
                     pathname2url(outfile),
                     urlencode({'url': url, 'download': 'false'}),
                 ),
@@ -212,8 +240,8 @@ def submit():
             return result
 
 
-@APP.route('/result/:filename#.*#')
-def result_file(filename):
+@APP.route('/<username>/result/:filename#.*#')
+def result_file(username, filename):
     """Route for obtaining a downloaded file.
 
     Depending on a `download` parameter in the HTTP request ('true'/'false'),
@@ -226,16 +254,16 @@ def result_file(filename):
     """
     try:
         filename = Path(filename).name  # protect against escaping from OUTDIR
-        logfile = (Path(OUTDIR) / filename).with_suffix('.log')
+        logfile = (Path(OUTDIRS[username]) / filename).with_suffix('.log')
         download = bottle.request.params.get("download", 'true')
-        exists = (Path(OUTDIR) / filename).is_file()
-    except OSError:
+        exists = (Path(OUTDIRS[username]) / filename).is_file()
+    except (OSError, KeyError):
         # protect against e.g. too long filenames
         bottle.abort(404, "Invalid filename")
 
     if download == 'true':
         if exists:
-            return bottle.static_file(filename, root=OUTDIR)
+            return bottle.static_file(filename, root=OUTDIRS[username])
         else:
             bottle.abort(404, "No file %s" % filename)
     content = '<h1 class="display-4">youtube-dl</h1>\n'
@@ -245,22 +273,27 @@ def result_file(filename):
             content += r'''
             <p>The video at <code><a href="{url}">{url}</a></code> has been processed.</p>
             <p>Download the resulting file:</p>
-            <p class="lead"><a href="/result/{filename_enc}">{filename}</a></p>
+            <p class="lead"><a href="/{username}/result/{filename_enc}">{filename}</a></p>
             '''.format(
-                url=url, filename_enc=pathname2url(filename), filename=filename
+                username=username,
+                url=url,
+                filename_enc=pathname2url(filename),
+                filename=filename,
             )
         else:
             content += r'''
             <p>Download the completed file:</p>
-            <p class="lead"><a href="/result/{filename_enc}">{filename}</a></p>
+            <p class="lead"><a href="/{username}/result/{filename_enc}">{filename}</a></p>
             '''.format(
-                filename_enc=pathname2url(filename), filename=filename
+                username=username,
+                filename_enc=pathname2url(filename),
+                filename=filename,
             )
     else:  # file does not (yet) exist
         if logfile.is_file():
             loglink = (
-                ' (see <a href="/result/%s?download=true">log file</a>)'
-                % logfile.name
+                ' (see <a href="/%s/result/%s?download=true">log file</a>)'
+                % (username, logfile.name)
             )
         else:
             loglink = ''
@@ -268,8 +301,9 @@ def result_file(filename):
             content += r'''
             <p>The video at <code><a href="{url}">{url}</a></code> is still being processed{loglink}.</p>
             <p>Wait for youtube-dl to complete, then download the resulting file:</p>
-            <p class="lead"><a href="/result/{filename_enc}?{params}">{filename}</a></p>
+            <p class="lead"><a href="/{username}/result/{filename_enc}?{params}">{filename}</a></p>
             '''.format(
+                username=username,
                 url=url,
                 loglink=loglink,
                 filename_enc=pathname2url(filename),
@@ -280,14 +314,15 @@ def result_file(filename):
             content += r'''
             <p>The requested file may still be processing{loglink}.</p>
             <p>Wait for youtube-dl to complete, then download the resulting file:</p>
-            <p class="lead"><a href="/result/{filename_enc}?download=false">{filename}</a></p>
+            <p class="lead"><a href="/{username}/result/{filename_enc}?download=false">{filename}</a></p>
             '''.format(
+                username=username,
                 filename=filename,
                 filename_enc=pathname2url(filename),
                 loglink=loglink,
             )
     template = (TEMPLATES / 'page.j2').read_text()
-    return bottle.template(template, title="filename", content=content)
+    return bottle.template(template, title=filename, content=content)
 
 
 def youtube_dl_show_progress(d, logger):
@@ -326,7 +361,7 @@ def youtube_dl_show_progress(d, logger):
         )
 
 
-def submit_download(url, preset):
+def submit_download(username, url, preset):
     """Send `url` to download-thread for downloading with given `preset`.
 
     Returns a dict with the following values:
@@ -339,8 +374,8 @@ def submit_download(url, preset):
     * `outfile`: the name of the output file (inside YDL_OUTDIR)
 
     If `success`, a tuple consisting of a YoutubeDL instance (initialized for
-    the given `preset`) and the url will be placed on the DL_Q Queue, to be
-    processed by the download-thread.
+    the given `preset`), the username, and the url will be placed on the DL_Q
+    Queue, to be processed by the download-thread.
     """
     fmt = FORMATS.get(preset, FORMATS[YDL_DEFAULT_PRESET])
     ydl_params = {
@@ -382,7 +417,7 @@ def submit_download(url, preset):
                 + "."
                 + ext
             )
-            outpath = str(Path(OUTDIR) / outfile)
+            outpath = str(Path(OUTDIRS[username]) / outfile)
             logfile = Path(outpath).with_suffix('.log')
             dl_logger = logging.getLogger('youtubedl.%s' % info['id'])
             configure_logging(
@@ -396,7 +431,7 @@ def submit_download(url, preset):
             ydl.add_progress_hook(
                 partial(youtube_dl_show_progress, logger=dl_logger)
             )
-            DL_Q.put((ydl, url))
+            DL_Q.put((ydl, username, url))
             MAIN_LOGGER.info("Added url %r to the download queue", url)
 
         return {
@@ -410,6 +445,14 @@ def submit_download(url, preset):
 
 @APP.route("/update", method="GET")
 def update():
+    """Update the youtube-dl backend."""
+    token = bottle.request.params.get("token", None)
+    if token not in TOKENS.values():
+        bottle.abort(401, "Not authorized")
+    return _update()
+
+
+def _update():
     command = ["pip", "install", "--upgrade", "youtube-dl"]
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -485,7 +528,7 @@ def dl_worker():
     )
     while True:
         try:
-            ydl, url = DL_Q.get()
+            ydl, username, url = DL_Q.get()
             if ydl is None:
                 return  # end the download thread with poison pill
             outfile = ydl.params['outtmpl']
@@ -493,10 +536,10 @@ def dl_worker():
                 logger.info("Removing existing %r", outfile)
                 Path(outfile).unlink()
             ydl.download([url])
-            if YDL_CHOWN_UID is not None:
-                os.chown(
-                    outfile, uid=int(YDL_CHOWN_UID), gid=int(YDL_CHOWN_GID)
-                )
+            if UIDS.get(username, None) is not None:
+                uid = int(UIDS[username])
+                gid = int(GIDS.get(username, uid))
+                os.chown(outfile, uid=uid, gid=gid)
             logger.info("Downloaded to %r", outfile)
             DL_Q.task_done()
         except Exception as exc_info:
@@ -513,7 +556,7 @@ def main():
     MAIN_LOGGER.info("Started download thread")
 
     MAIN_LOGGER.info("Updating youtube-dl to the newest version")
-    updateResult = update()
+    updateResult = _update()
     MAIN_LOGGER.info(updateResult["output"].strip())
     MAIN_LOGGER.info(updateResult["error"].strip())
     APP.run(

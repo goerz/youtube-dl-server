@@ -1,9 +1,9 @@
-      <h1 class="display-4"><a href="/?token={{token}}">youtube-dl</a></h1>
+      <h1 class="display-4"><a href="{{username}}/?token={{token}}">youtube-dl</a></h1>
       <p class="lead">Enter a video url to download the video to the server. Url can be to YouTube or any
           other supported site.</p>
       <hr class="my-4">
       <div>
-        <form action="/submit" method="POST">
+        <form action="{{username}}/submit" method="POST">
           <div class="input-group">
             <input name="url" type="url" class="form-control" placeholder="URL" aria-label="URL" aria-describedby="button-submit" autofocus>
             <select class="custom-select" name="format">
@@ -19,5 +19,9 @@
             </div>
           </div>
         </form>
+      </div>
+      <hr class="my-4">
+      <div>
+          <p><a href="{{username}}/list?token={{token}}">See a list of previously downloaded files.<a><p>
       </div>
     </div>
