@@ -28,7 +28,6 @@ if not OUTDIR.endswith('/'):
 YDL_CHOWN_UID = os.environ.get('YDL_CHOWN_UID', None)
 YDL_CHOWN_GID = os.environ.get('YDL_CHOWN_GID', -1)
 YDL_OUTPUT_TEMPLATE = '{title} [{id}]'
-YDL_ARCHIVE_FILE = os.environ.get('YDL_ARCHIVE_FILE', None)
 YDL_SERVER_HOST = os.environ.get('YDL_SERVER_HOST', '0.0.0.0')
 YDL_SERVER_PORT = int(os.environ.get('YDL_SERVER_PORT', 8080))
 YDL_LOGFILE = os.environ.get('YDL_LOGFILE', 'youtube-dl-server.log')
@@ -349,7 +348,6 @@ def submit_download(url, preset):
         'noplaylist': True,
         'postprocessors': POSTPROCESSORS[preset],
         'outtmpl': YDL_OUTPUT_TEMPLATE,
-        'download_archive': YDL_ARCHIVE_FILE,
         'progress_hooks': [],
         'quiet': True,
         'no_warnings': True,
