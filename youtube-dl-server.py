@@ -12,11 +12,13 @@ from functools import partial, wraps
 from pathlib import Path
 from queue import Queue
 from threading import Thread
+from urllib.parse import urlencode
+from urllib.request import pathname2url
 
 import bottle
 import youtube_dl
 
-TOKEN = os.environ.get('YDL_TOKEN', 'youtube-dl')
+TOKEN = os.environ.get('YDL_TOKEN', 'testing')
 OUTDIR = os.environ.get('YDL_OUTDIR', '')
 if OUTDIR == '':
     OUTDIR = '.'
@@ -38,9 +40,9 @@ except AttributeError:
     print("WARNING: invalid YDL_LOGLEVEL %r. Using INFO" % _YDL_LOGLEVEL)
     YDL_LOGLEVEL = logging.INFO
 
-YDL_DEFAULT_PROFILE = os.environ.get('YDL_DEFAULT_PROFILE', 'normalmp4')
+YDL_DEFAULT_PRESET = os.environ.get('YDL_DEFAULT_PRESET', 'normalmp4')
 
-FORMATS = {  # profile => YoutubeDL format
+FORMATS = {  # preset => YoutubeDL format
     'smallmp4': 'mp4[height<=480]/best[ext=mp4]',
     'normalmp4': 'mp4[height<=720]/best[ext=mp4]',
     'bestmp4': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
@@ -48,7 +50,7 @@ FORMATS = {  # profile => YoutubeDL format
 }
 
 POSTPROCESSORS = defaultdict(list)
-# profile => postprocessor settings
+# preset => postprocessor settings
 POSTPROCESSORS['mp3'] = [
     {
         'key': 'FFmpegExtractAudio',
@@ -57,7 +59,7 @@ POSTPROCESSORS['mp3'] = [
     }
 ]
 
-EXTENSIONS = {  # profile => file extension
+EXTENSIONS = {  # preset => file extension
     'smallmp4': 'mp4',
     'normalmp4': 'mp4',
     'bestmp4': 'mp4',
@@ -67,6 +69,8 @@ EXTENSIONS = {  # profile => file extension
 DL_Q = Queue()
 
 MAIN_LOGGER = logging.getLogger('youtubedl-server')
+
+TEMPLATES = Path(__file__).parent / 'templates'
 
 
 def configure_logging(
@@ -123,56 +127,168 @@ APP = bottle.Bottle()
 APP.install(partial(log_to_logger, logger=MAIN_LOGGER))
 
 
-@APP.route('/' + TOKEN)
+@APP.route('/')
 def dl_form():
-    index_html = (Path(__file__).parent / 'index.html').read_text()
-    return bottle.template(index_html, token=TOKEN)
+    """Route for the root page (form for submitting a video)."""
+    token = bottle.request.params.get("token", None)
+    if token != TOKEN:
+        bottle.abort(401, "Not authorized")
+    template = (TEMPLATES / 'page.j2').read_text()
+    content = bottle.template((TEMPLATES / 'form.j2').read_text(), token=token)
+    return bottle.template(template, title="youtube-dl", content=content)
 
 
-@APP.route('/' + TOKEN + '/static/:filename#.*#')
+@APP.route('/list')
+def list_files():
+    """Route for listing downloaded files."""
+    token = bottle.request.params.get("token", None)
+    if token != TOKEN:
+        bottle.abort(401, "Not authorized")
+    template = (TEMPLATES / 'page.j2').read_text()
+    content = [
+        '<h1 class="display-4">',
+        '<a href="/?token={token}">youtube-dl</a>'.format(token=token),
+        '</h1>' '<div class="text-left">',
+        '<p>Available files:</p>',
+        '<ul>',
+    ]
+    for filename in Path(OUTDIR).iterdir():
+        if filename.is_file() and filename.suffix in ('.mp4', '.mp3'):
+            content.append(
+                '<li><a href="/result/%s">%s</a></li>'
+                % (pathname2url(str(filename.name)), filename.name)
+            )
+    content.append('</ul></div>')
+    return bottle.template(
+        template, title="youtube-dl", content="\n".join(content)
+    )
+
+
+@APP.route('/static/:filename#.*#')
 def server_static(filename):
+    """Route static resources, e.g. CSS files."""
     return bottle.static_file(filename, root='./static')
 
 
-@APP.route('/' + TOKEN + '/result/:filename#.*#')
-def result_file(filename):
-    if (Path(OUTDIR) / filename).is_file():
-        return bottle.static_file(filename, root=OUTDIR)
-    else:
-        result_html = (
-            Path(__file__).parent / 'result_not_available.html'
-        ).read_text()
-        return bottle.template(result_html, token=TOKEN, outfile=filename)
-
-
-@APP.route('/' + TOKEN + '/q', method='GET')
-def q_size():
-    return {"success": True, "size": json.dumps(list(DL_Q.queue))}
-
-
-@APP.route('/' + TOKEN + '/q', method='POST')
-def q_put():
-    url = bottle.request.forms.get("url")
-    return_json = bottle.request.forms.get("return_json", 'true')
+@APP.route('/submit', method='POST')
+def submit():
+    """Route for submitting a request to download a video."""
+    return_json = bottle.request.params.get("return_json", 'true')
+    token = bottle.request.params.get("token", None)
+    if token != TOKEN:
+        if return_json == 'true':
+            return {
+                "success": False,
+                "error": "not authorized",
+            }
+        else:
+            bottle.abort(401, "Not authorized")
+    url = bottle.request.params.get("url")
     if not url:
-        return {
-            "success": False,
-            "error": "/q called without a 'url' query param",
-        }
-    # TODO: rename 'format' in request to 'profile'
-    profile = bottle.request.forms.get("format", YDL_DEFAULT_PROFILE)
-
-    result = submit_download(url, profile)
+        if return_json == 'true':
+            return {
+                "success": False,
+                "error": "missing 'url' query param",
+            }
+        else:
+            bottle.abort(400, "missing 'url' query param")
+    preset = bottle.request.params.get("preset", YDL_DEFAULT_PRESET)
+    result = submit_download(url, preset)
 
     if return_json == 'true':
         return result
     else:
-        # TODO: give error message
-        result_html = (Path(__file__).parent / 'result.html').read_text()
-        outfile = result['outfile']
-        return bottle.template(
-            result_html, token=TOKEN, url=url, outfile=outfile
-        )
+        if result['success']:
+            outfile = result['outfile']
+            # Redirect to resulting file (https://httpstatuses.com/303)
+            bottle.redirect(
+                "/result/%s?%s"
+                % (
+                    pathname2url(outfile),
+                    urlencode({'url': url, 'download': 'false'}),
+                ),
+                code=303,
+            )
+        else:
+            return result
+
+
+@APP.route('/result/:filename#.*#')
+def result_file(filename):
+    """Route for obtaining a downloaded file.
+
+    Depending on a `download` parameter in the HTTP request ('true'/'false'),
+    either try to download the file directly, or render an HTML page containing
+    a direct link to the file. The latter may be preferable because then a use
+    can right-click on the link and choose what do do with it.
+
+    No authentication token is used. This is so that a "result" link can be
+    shared publicly without exposing the token.
+    """
+    try:
+        filename = Path(filename).name  # protect against escaping from OUTDIR
+        logfile = (Path(OUTDIR) / filename).with_suffix('.log')
+        download = bottle.request.params.get("download", 'true')
+        exists = (Path(OUTDIR) / filename).is_file()
+    except OSError:
+        # protect against e.g. too long filenames
+        bottle.abort(404, "Invalid filename")
+
+    if download == 'true':
+        if exists:
+            return bottle.static_file(filename, root=OUTDIR)
+        else:
+            bottle.abort(404, "No file %s" % filename)
+    content = '<h1 class="display-4">youtube-dl</h1>\n'
+    url = bottle.request.params.get("url", None)
+    if exists:
+        if url:
+            content += r'''
+            <p>The video at <code><a href="{url}">{url}</a></code> has been processed.</p>
+            <p>Download the resulting file:</p>
+            <p class="lead"><a href="/result/{filename_enc}">{filename}</a></p>
+            '''.format(
+                url=url, filename_enc=pathname2url(filename), filename=filename
+            )
+        else:
+            content += r'''
+            <p>Download the completed file:</p>
+            <p class="lead"><a href="/result/{filename_enc}">{filename}</a></p>
+            '''.format(
+                filename_enc=pathname2url(filename), filename=filename
+            )
+    else:  # file does not (yet) exist
+        if logfile.is_file():
+            loglink = (
+                ' (see <a href="/result/%s?download=true">log file</a>)'
+                % logfile.name
+            )
+        else:
+            loglink = ''
+        if url:
+            content += r'''
+            <p>The video at <code><a href="{url}">{url}</a></code> is still being processed{loglink}.</p>
+            <p>Wait for youtube-dl to complete, then download the resulting file:</p>
+            <p class="lead"><a href="/result/{filename_enc}?{params}">{filename}</a></p>
+            '''.format(
+                url=url,
+                loglink=loglink,
+                filename_enc=pathname2url(filename),
+                filename=filename,
+                params=urlencode({'download': 'false', 'url': url}),
+            )
+        else:
+            content += r'''
+            <p>The requested file may still be processing{loglink}.</p>
+            <p>Wait for youtube-dl to complete, then download the resulting file:</p>
+            <p class="lead"><a href="/result/{filename_enc}?download=false">{filename}</a></p>
+            '''.format(
+                filename=filename,
+                filename_enc=pathname2url(filename),
+                loglink=loglink,
+            )
+    template = (TEMPLATES / 'page.j2').read_text()
+    return bottle.template(template, title="filename", content=content)
 
 
 def youtube_dl_show_progress(d, logger):
@@ -194,9 +310,7 @@ def youtube_dl_show_progress(d, logger):
         try:
             total_MB = "%.1f" % (float(total_bytes) / 1048576.0)
             percent = "%d" % (
-                100
-                * float(d['downloaded_bytes'])
-                / float(total_bytes)
+                100 * float(d['downloaded_bytes']) / float(total_bytes)
             )
         except TypeError:
             percent = '???'
@@ -213,27 +327,27 @@ def youtube_dl_show_progress(d, logger):
         )
 
 
-def submit_download(url, profile):
-    """Send `url` to download-thread for downloading with given `profile`.
+def submit_download(url, preset):
+    """Send `url` to download-thread for downloading with given `preset`.
 
     Returns a dict with the following values:
 
     * `success`: whether youtube-dl could successfully identify a video at the
        given `url`
     * `url`: the input `url`
-    * `profile`: the input `profile`
-    * `format`: the youtube-dl format code associated with the `profile`
+    * `preset`: the input `preset`
+    * `format`: the youtube-dl format code associated with the `preset`
     * `outfile`: the name of the output file (inside YDL_OUTDIR)
 
     If `success`, a tuple consisting of a YoutubeDL instance (initialized for
-    the given `profile`) and the url will be placed on the DL_Q Queue, to be
+    the given `preset`) and the url will be placed on the DL_Q Queue, to be
     processed by the download-thread.
     """
-    fmt = FORMATS.get(profile, FORMATS[YDL_DEFAULT_PROFILE])
+    fmt = FORMATS.get(preset, FORMATS[YDL_DEFAULT_PRESET])
     ydl_params = {
         'format': fmt,
         'noplaylist': True,
-        'postprocessors': POSTPROCESSORS[profile],
+        'postprocessors': POSTPROCESSORS[preset],
         'outtmpl': YDL_OUTPUT_TEMPLATE,
         'download_archive': YDL_ARCHIVE_FILE,
         'progress_hooks': [],
@@ -264,7 +378,7 @@ def submit_download(url, profile):
                         "\ninfo = %s" % pprint.pformat(info), '    '
                     )
                 )
-            ext = EXTENSIONS.get(profile, 'mp4')
+            ext = EXTENSIONS.get(preset, 'mp4')
             outfile = (
                 SanitizedFilenameTmpl(YDL_OUTPUT_TEMPLATE).format(**info)
                 + "."
@@ -277,7 +391,7 @@ def submit_download(url, profile):
                 dl_logger,
                 logfile=logfile,
                 log_to_stdout=True,
-                level=logging.INFO,
+                level=YDL_LOGLEVEL,
             )
             ydl.params['outtmpl'] = outpath
             ydl.params['logger'] = dl_logger
@@ -290,13 +404,13 @@ def submit_download(url, profile):
         return {
             "success": success,
             "url": url,
-            "profile": profile,
+            "preset": preset,
             "format": fmt,
             "outfile": outfile,
         }
 
 
-@APP.route("/" + TOKEN + "/update", method="GET")
+@APP.route("/update", method="GET")
 def update():
     command = ["pip", "install", "--upgrade", "youtube-dl"]
     proc = subprocess.Popen(
