@@ -46,7 +46,7 @@ YDL_OUTPUT_TEMPLATE = '{title} [{id}]'
 YDL_SERVER_HOST = os.environ.get('YDL_SERVER_HOST', '0.0.0.0')
 YDL_SERVER_PORT = int(os.environ.get('YDL_SERVER_PORT', 8080))
 YDL_LOGFILE = os.environ.get('YDL_LOGFILE', 'youtube-dl-server.log')
-YDL_DL_LOGFILE = os.environ.get('YDL_LOGFILE', 'youtube-dl.log')
+YDL_DL_LOGFILE = os.environ.get('YDL_DL_LOGFILE', 'youtube-dl.log')
 try:
     _YDL_LOGLEVEL = os.environ.get('YDL_LOGLEVEL', 'INFO').upper()
     YDL_LOGLEVEL = getattr(logging, _YDL_LOGLEVEL)
