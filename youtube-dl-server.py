@@ -172,6 +172,7 @@ def dl_form(username):
 def list_files(username):
     """Route for listing downloaded files."""
     token = bottle.request.params.get("token", None)
+    sort = bottle.request.params.get("sort", 'ctime')
     if not is_authorized(username, token):
         bottle.abort(401, "Not authorized")
     template = (TEMPLATES / 'page.j2').read_text()
@@ -184,7 +185,16 @@ def list_files(username):
         '<p>Available files:</p>',
         '<ul>',
     ]
-    for filename in Path(OUTDIRS[username]).iterdir():
+    sortkeys = {
+        'name': lambda f: f.name,
+        'time': lambda f: f.stat().st_ctime,  # alias for creation time
+        'ctime': lambda f: f.stat().st_ctime,
+        'mtime': lambda f: f.stat().st_mtime,
+        'size': lambda f: f.stat().st_size,
+    }
+    sortkey = sortkeys.get(sort, sortkeys['ctime'])
+    files = Path(OUTDIRS[username]).iterdir()
+    for filename in sorted(files, key=sortkey):
         if filename.is_file() and filename.suffix in ('.mp4', '.mp3'):
             content.append(
                 '<li><a href="/%s/result/%s">%s</a></li>'
@@ -569,6 +579,7 @@ def main():
     updateResult = _update()
     MAIN_LOGGER.info(updateResult["output"].strip())
     MAIN_LOGGER.info(updateResult["error"].strip())
+    MAIN_LOGGER.info("Serving on %s:%s" % (YDL_SERVER_HOST, YDL_SERVER_PORT))
     APP.run(
         host=YDL_SERVER_HOST, port=YDL_SERVER_PORT, quiet=True,
     )
