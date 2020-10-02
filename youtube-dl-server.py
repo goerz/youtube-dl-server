@@ -35,6 +35,7 @@ def process_users(ydl_users):
         outdirs[username] = outdir or './'
         if not outdirs[username].endswith("/"):
             outdirs[username] += "/"
+        Path(outdirs[username]).mkdir(parents=True, exist_ok=True)
         uids[username] = uid or None
         gids[username] = gid or None
     return tokens, outdirs, uids, gids
